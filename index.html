@@ -1,0 +1,1047 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#020617" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Revisor" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <title>Revisor Inteligente</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      html, body, #root { min-height: 100%; margin: 0; }
+      body { background: #020617; }
+      * { -webkit-tap-highlight-color: transparent; }
+    </style>
+  </head>
+  <body>
+    <noscript>Este app precisa de JavaScript ativado.</noscript>
+    <div id="root"></div>
+    <script type="text/babel" data-presets="env,react">
+const { useEffect, useMemo, useState } = React;
+
+const STORAGE_KEY = "revisor_inteligente_mobile_pwa_v1";
+const MINUTE = 60 * 1000;
+const DAY = 24 * 60 * MINUTE;
+const TEMP_CARD_TTL = MINUTE;
+const HARD_TRIGGER_MS = 5 * 1000;
+const NORMAL_QUESTION_MS = MINUTE;
+const MAX_SIMPLIFICATION_LEVEL = 3;
+
+function now() {
+  return Date.now();
+}
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-5);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+const seedCards = [
+  {
+    id: "exemplo-normal-01",
+    statement: "Revisar um conteúdo várias vezes, com intervalos crescentes, ajuda a consolidar a memória.",
+    answer: true,
+    correctFeedback: "Certo. A repetição espaçada favorece a retenção do conteúdo.",
+    wrongFeedback: "Se marcou Errado, confundiu repetição aleatória com revisão espaçada planejada.",
+    curiosity: "A revisão espaçada funciona melhor quando o intervalo cresce conforme o domínio do conteúdo.",
+    explanationText: "A afirmação está certa porque a repetição com intervalos crescentes tende a fortalecer a lembrança e reduzir o esquecimento.",
+    tag: "exemplo: estudo",
+    manualSource: true,
+    simplifications: [
+      {
+        statement: "Estudar de novo depois de um intervalo pode ajudar a lembrar melhor.",
+        answer: true,
+        correctFeedback: "Certo. O intervalo força a recuperação ativa da memória.",
+        wrongFeedback: "Errado seria pensar que só revisar imediatamente funciona.",
+        curiosity: "A recuperação ativa é mais forte quando você tenta lembrar antes de reler.",
+        explanationText: "A afirmação está certa porque revisar após algum intervalo estimula a memória de longo prazo.",
+        tag: "exemplo: estudo"
+      },
+      {
+        statement: "A revisão espaçada usa intervalos entre as revisões.",
+        answer: true,
+        correctFeedback: "Certo. O espaçamento é a ideia central desse método.",
+        wrongFeedback: "Errado seria ignorar o papel dos intervalos.",
+        curiosity: "Intervalos muito curtos podem virar releitura passiva; intervalos ajustados estimulam lembrança.",
+        explanationText: "A afirmação está certa porque o método se baseia em revisar novamente depois de um período de tempo.",
+        tag: "exemplo: estudo"
+      }
+    ]
+  },
+  {
+    id: "exemplo-hard-01",
+    statement: "Na revisão espaçada, errar uma questão deve sempre aumentar imediatamente o intervalo de revisão.",
+    answer: false,
+    correctFeedback: "Correto marcar Errado. Em geral, o erro indica que o conteúdo deve voltar mais cedo.",
+    wrongFeedback: "Se marcou Certo, confundiu erro com sinal de domínio.",
+    curiosity: "Muitos sistemas reduzem o intervalo após erro para reforçar o ponto fraco.",
+    explanationText: "A afirmação está errada porque o erro normalmente reduz o intervalo, fazendo o conteúdo reaparecer antes.",
+    tag: "exemplo: estudo",
+    isHard: true,
+    manualSource: true,
+    relatedTo: "exemplo-normal-01",
+    linkedNormalId: "exemplo-normal-01",
+    dueAt: null
+  },
+  {
+    id: "exemplo-normal-02",
+    statement: "Uma questão de certo ou errado deve conter uma afirmação julgável, não um texto longo com várias ideias misturadas.",
+    answer: true,
+    correctFeedback: "Certo. Uma afirmação única facilita identificar o gabarito e revisar o erro.",
+    wrongFeedback: "Se marcou Errado, lembre que questões muito amplas atrapalham a revisão.",
+    curiosity: "Quanto mais objetiva a afirmação, melhor o app consegue gerar feedback e revisão.",
+    explanationText: "A afirmação está certa porque questões com uma ideia central reduzem ambiguidade e melhoram o treino.",
+    tag: "exemplo: questões",
+    manualSource: true,
+    simplifications: []
+  }
+];
+
+const manualInstructionPrompt = `Você deve transformar o conteúdo fornecido em questões de CERTO ou ERRADO para serem coladas no aplicativo de revisão.
+
+Para cada questão, use este conjunto:
+
+[questao]
+[normal]
+*afirmação correta aqui* ou !afirmação errada aqui!
+[certo]mensagem curta para quando o usuário acertar[/certo]
+[errado]mensagem curta para quando o usuário errar[/errado]
+[curiosidade]curiosidade curta e útil sobre o tema[/curiosidade]
+[explicacao]explicação que confirma o gabarito: se for certa, justifique por que está certa; se for errada, justifique por que está errada[/explicacao]
+#tema#
+[/normal]
+
+[simplificacao1]
+*outra versão mais simples, mantendo o gabarito quando possível*
+[certo]feedback de acerto[/certo]
+[errado]feedback de erro[/errado]
+[curiosidade]curiosidade curta[/curiosidade]
+[explicacao]explicação do gabarito[/explicacao]
+[/simplificacao1]
+
+[simplificacao2]
+*segunda simplificação complementar*
+[certo]feedback de acerto[/certo]
+[errado]feedback de erro[/errado]
+[curiosidade]curiosidade curta[/curiosidade]
+[explicacao]explicação do gabarito[/explicacao]
+[/simplificacao2]
+
+[simplificacao3]
+*terceira simplificação complementar*
+[certo]feedback de acerto[/certo]
+[errado]feedback de erro[/errado]
+[curiosidade]curiosidade curta[/curiosidade]
+[explicacao]explicação do gabarito[/explicacao]
+[/simplificacao3]
+
+[questao-dificil]
+!questão mais difícil vinculada ao mesmo tema!
+[certo]feedback de acerto[/certo]
+[errado]feedback de erro[/errado]
+[curiosidade]curiosidade curta[/curiosidade]
+[explicacao]explicação do gabarito[/explicacao]
+#mesmo tema#
+[/questao-dificil]
+[/questao]
+
+Regras:
+- Cada conjunto começa com [questao] e termina com [/questao].
+- Cada bloco deve ter apenas uma afirmação julgável como Certo ou Errado.
+- A curiosidade traz um detalhe útil.
+- A explicação confirma o gabarito real da questão.
+- Não use JSON.
+- Retorne somente os blocos finais.
+
+Conteúdo-base:
+COLE AQUI O CONTEÚDO`;
+
+function toBool(value) {
+  if (typeof value === "boolean") return value;
+  const text = String(value || "").trim().toLowerCase();
+  if (["true", "certo", "correto", "verdadeiro", "v", "sim", "1"].includes(text)) return true;
+  if (["false", "errado", "incorreto", "falso", "f", "nao", "não", "0"].includes(text)) return false;
+  return null;
+}
+
+function normalizeCard(raw) {
+  const answer = toBool(raw.answer !== undefined ? raw.answer : raw.gabarito);
+  const statement = String(raw.statement || raw.afirmacao || raw.afirmação || raw.pergunta || "").trim();
+  const fallback = String(raw.explanation || raw.explicacao || raw.feedback || "").trim();
+  const tag = String(raw.tag || raw.tema || raw.assunto || "geral").trim() || "geral";
+  const correctFeedback = String(raw.correctFeedback || raw.feedbackCerto || fallback || "Resposta correta.").trim();
+  const wrongFeedback = String(raw.wrongFeedback || raw.feedbackErrado || fallback || "Resposta incorreta.").trim();
+  const curiosity = String(raw.curiosity || raw.curiosidade || correctFeedback).trim();
+  const explanationText = String(raw.explanationText || raw.explicacao || raw.explicação || raw.justificativa || correctFeedback).trim();
+
+  return {
+    id: raw.id || uid(),
+    statement,
+    answer: answer === null ? true : answer,
+    correctFeedback,
+    wrongFeedback,
+    curiosity,
+    explanationText,
+    tag,
+    relatedTo: raw.relatedTo || raw.vinculo || raw.vínculo || tag,
+    linkedNormalId: raw.linkedNormalId || null,
+    isHard: Boolean(raw.isHard || raw.hard || raw.dificil || raw.difícil),
+    manualSource: Boolean(raw.manualSource || raw.manual),
+    createdAt: raw.createdAt || now(),
+    updatedAt: raw.updatedAt || now(),
+    dueAt: raw.dueAt === null || raw.isHard || raw.hard || raw.dificil || raw.difícil ? null : raw.dueAt || now(),
+    intervalMs: raw.intervalMs || 0,
+    reviews: raw.reviews || 0,
+    correct: raw.correct || 0,
+    wrong: raw.wrong || 0,
+    streak: raw.streak || 0,
+    reviewBurden: raw.reviewBurden || 0,
+    reviewStage: raw.reviewStage || "novo",
+    lastAnswer: raw.lastAnswer === undefined ? null : raw.lastAnswer,
+    lastWasCorrect: raw.lastWasCorrect === undefined ? null : raw.lastWasCorrect,
+    lastReviewedAt: raw.lastReviewedAt || null,
+    lastResponseMs: raw.lastResponseMs || null,
+    lastReviewClass: raw.lastReviewClass || null,
+    nextReviewReason: raw.nextReviewReason || "A questão ainda não foi revisada.",
+    temporary: Boolean(raw.temporary),
+    expiresAt: raw.expiresAt || null,
+    activatedAt: raw.activatedAt || null,
+    originId: raw.originId || null,
+    generatedKind: raw.generatedKind || null,
+    simplificationLevel: raw.simplificationLevel || 0,
+    sourceHardCardId: raw.sourceHardCardId || null,
+    simplifications: Array.isArray(raw.simplifications) ? raw.simplifications.slice(0, MAX_SIMPLIFICATION_LEVEL) : []
+  };
+}
+
+function createSeedDeck() {
+  return seedCards.map((card) => normalizeCard(card));
+}
+
+function loadCards() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return createSeedDeck();
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed) || parsed.length === 0) return createSeedDeck();
+    return parsed.map(normalizeCard).filter((card) => card.statement);
+  } catch {
+    return createSeedDeck();
+  }
+}
+
+function saveCards(cards) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.ceil(Math.max(0, ms) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatWhen(ts) {
+  if (!ts) return "sem prazo";
+  const diff = ts - now();
+  if (diff <= 0) return "agora";
+  if (diff < 60 * MINUTE) return `em ${Math.ceil(diff / MINUTE)} min`;
+  if (diff < DAY) return `em ${Math.ceil(diff / (60 * MINUTE))} h`;
+  return `em ${Math.ceil(diff / DAY)} dia(s)`;
+}
+
+function formatCountdown(expiresAt, referenceTime = now()) {
+  if (!expiresAt) return "sem prazo";
+  return formatDuration(expiresAt - referenceTime);
+}
+
+function formatDateTime(ts) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function getTimerPercent(startedAt, totalMs, referenceTime = now()) {
+  if (!startedAt || !totalMs) return 100;
+  const elapsed = referenceTime - startedAt;
+  return clamp(((totalMs - elapsed) / totalMs) * 100, 0, 100);
+}
+
+function getCountdownPercent(card, referenceTime = now()) {
+  if (!card || !card.expiresAt) return 0;
+  const createdAt = card.activatedAt || card.createdAt || referenceTime;
+  const total = Math.max(1, card.expiresAt - createdAt);
+  const remaining = Math.max(0, card.expiresAt - referenceTime);
+  return clamp((remaining / total) * 100, 0, 100);
+}
+
+function classifyReviewTime(responseMs) {
+  if (responseMs <= HARD_TRIGGER_MS) return { label: "Domínio rápido", short: "rápida+", multiplier: 1.45 };
+  if (responseMs <= 15 * 1000) return { label: "Revisão rápida", short: "rápida", multiplier: 1.2 };
+  if (responseMs <= 45 * 1000) return { label: "Revisão normal", short: "normal", multiplier: 1 };
+  return { label: "Revisão lenta", short: "lenta", multiplier: 0.75 };
+}
+
+function getBetweenMarkers(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  if (start < 0) return "";
+  const contentStart = start + startMarker.length;
+  const end = text.indexOf(endMarker || startMarker, contentStart);
+  if (end < 0) return "";
+  return text.slice(contentStart, end).trim();
+}
+
+function getLineValue(text, label) {
+  const target = label.toLowerCase();
+  for (const line of String(text).split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.toLowerCase().startsWith(target)) return trimmed.slice(label.length).trim();
+  }
+  return "";
+}
+
+function getMarkedBlock(text, marker) {
+  return getBetweenMarkers(text, `[${marker}]`, `[/${marker}]`);
+}
+
+function getMarkedBlocks(text, marker) {
+  const source = String(text || "");
+  const startMarker = `[${marker}]`;
+  const endMarker = `[/${marker}]`;
+  const blocks = [];
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const start = source.indexOf(startMarker, cursor);
+    if (start < 0) break;
+    const contentStart = start + startMarker.length;
+    const end = source.indexOf(endMarker, contentStart);
+    if (end < 0) break;
+    const content = source.slice(contentStart, end).trim();
+    if (content) blocks.push(content);
+    cursor = end + endMarker.length;
+  }
+
+  return blocks;
+}
+
+function splitManualQuestionGroups(text) {
+  const source = String(text || "").trim();
+  if (!source) return [];
+  const wrappedGroups = getMarkedBlocks(source, "questao").concat(getMarkedBlocks(source, "questão"));
+  if (wrappedGroups.length) return wrappedGroups;
+
+  const starts = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const start = source.indexOf("[normal]", cursor);
+    if (start < 0) break;
+    starts.push(start);
+    cursor = start + "[normal]".length;
+  }
+
+  if (starts.length <= 1) return [source];
+  return starts.map((start, index) => source.slice(start, starts[index + 1] || source.length).trim()).filter(Boolean);
+}
+
+function removeMarkedBlock(text, marker) {
+  const startMarker = `[${marker}]`;
+  const endMarker = `[/${marker}]`;
+  let output = text;
+  while (output.includes(startMarker) && output.includes(endMarker)) {
+    const start = output.indexOf(startMarker);
+    const end = output.indexOf(endMarker, start + startMarker.length);
+    if (start < 0 || end < 0) break;
+    output = output.slice(0, start) + output.slice(end + endMarker.length);
+  }
+  return output;
+}
+
+function parseSingleAnnotatedBlock(block, defaultTag) {
+  const trimmed = String(block || "").trim();
+  if (!trimmed) return null;
+
+  const correctStatement = getBetweenMarkers(trimmed, "*", "*");
+  const wrongStatement = getBetweenMarkers(trimmed, "!", "!");
+  const correctFeedback = getMarkedBlock(trimmed, "certo") || getLineValue(trimmed, "Certo:");
+  const wrongFeedback = getMarkedBlock(trimmed, "errado") || getLineValue(trimmed, "Errado:");
+  const curiosity = getMarkedBlock(trimmed, "curiosidade") || getLineValue(trimmed, "Curiosidade:") || correctFeedback;
+  const explanationText = getMarkedBlock(trimmed, "explicacao") || getMarkedBlock(trimmed, "explicação") || getMarkedBlock(trimmed, "justificativa") || getLineValue(trimmed, "Explicação:") || correctFeedback;
+  const tag = getBetweenMarkers(trimmed, "#", "#") || getLineValue(trimmed, "Tag:") || defaultTag || "geral";
+
+  if (correctStatement) return normalizeCard({ statement: correctStatement, answer: true, correctFeedback, wrongFeedback, curiosity, explanationText, tag, manualSource: true });
+  if (wrongStatement) return normalizeCard({ statement: wrongStatement, answer: false, correctFeedback, wrongFeedback, curiosity, explanationText, tag, manualSource: true });
+  return null;
+}
+
+function parseAnnotatedManualText(text, defaultTag) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return null;
+  const normalBlock = getMarkedBlock(trimmed, "normal");
+  const mainSource = normalBlock || ["simplificacao1", "simplificacao2", "simplificacao3", "questao-dificil"].reduce((current, marker) => removeMarkedBlock(current, marker), trimmed);
+  const mainCard = parseSingleAnnotatedBlock(mainSource, defaultTag);
+  if (!mainCard) return null;
+
+  const simplifications = [1, 2, 3]
+    .map((level) => getMarkedBlock(trimmed, `simplificacao${level}`) || getMarkedBlock(trimmed, `simplificação${level}`))
+    .map((block) => parseSingleAnnotatedBlock(block, mainCard.tag))
+    .filter(Boolean)
+    .map((card, index) => ({ ...card, tag: mainCard.tag, simplificationLevel: index + 1 }));
+
+  const mainWithSimplifications = normalizeCard({ ...mainCard, simplifications, isHard: false, relatedTo: mainCard.tag });
+  const outputCards = [mainWithSimplifications];
+  const hardBlock = getMarkedBlock(trimmed, "questao-dificil") || getMarkedBlock(trimmed, "questão-difícil");
+  const hardCard = parseSingleAnnotatedBlock(hardBlock, mainCard.tag);
+
+  if (hardCard) {
+    outputCards.push(normalizeCard({
+      ...hardCard,
+      isHard: true,
+      manualSource: true,
+      relatedTo: mainWithSimplifications.id,
+      linkedNormalId: mainWithSimplifications.id,
+      dueAt: null
+    }));
+  }
+
+  return { cards: outputCards, mainCard: mainWithSimplifications };
+}
+
+function parseAnnotatedManualBatch(text, defaultTag) {
+  const groups = splitManualQuestionGroups(text);
+  const cards = [];
+  for (const group of groups) {
+    const parsed = parseAnnotatedManualText(group, defaultTag);
+    if (parsed?.cards?.length) cards.push(...parsed.cards);
+  }
+  return cards;
+}
+
+function normalizeRelation(text) {
+  return String(text || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function isHardQuestionRelatedTo(hardCard, baseCard) {
+  if (!hardCard || !baseCard) return false;
+  const hardValues = [hardCard.relatedTo, hardCard.linkedNormalId, hardCard.tag].map(normalizeRelation).filter(Boolean);
+  const baseValues = [baseCard.id, baseCard.tag, baseCard.relatedTo].map(normalizeRelation).filter(Boolean);
+  return hardValues.some((hard) => baseValues.some((base) => hard === base || hard.includes(base) || base.includes(hard)));
+}
+
+function findHardQuestionForBase(cards, baseCard) {
+  return cards.find((card) => card.isHard && isHardQuestionRelatedTo(card, baseCard)) || null;
+}
+
+function makeTemporaryCard(raw, kind, originCard, extra = {}) {
+  const createdAt = now();
+  return normalizeCard({
+    ...raw,
+    id: uid(),
+    tag: raw.tag || originCard?.tag || "treino temporário",
+    createdAt,
+    updatedAt: createdAt,
+    dueAt: createdAt,
+    temporary: true,
+    expiresAt: null,
+    activatedAt: null,
+    originId: originCard?.originId || originCard?.id || null,
+    generatedKind: kind,
+    simplificationLevel: extra.simplificationLevel || 0
+  });
+}
+
+function createSimplifiedCard(card) {
+  const level = (card.simplificationLevel || 0) + 1;
+  if (level > MAX_SIMPLIFICATION_LEVEL) return null;
+  const stored = Array.isArray(card.simplifications) ? card.simplifications[level - 1] : null;
+  if (stored) return makeTemporaryCard(stored, "simplified", card, { simplificationLevel: level });
+
+  return makeTemporaryCard({
+    statement: card.statement,
+    answer: card.answer,
+    correctFeedback: card.correctFeedback,
+    wrongFeedback: card.wrongFeedback,
+    curiosity: card.curiosity,
+    explanationText: card.explanationText,
+    tag: card.tag,
+    simplifications: card.simplifications || []
+  }, "simplified", card, { simplificationLevel: level });
+}
+
+function createRelatedCard(baseCard) {
+  return makeTemporaryCard({
+    statement: `Revise novamente o ponto central deste tema: ${baseCard.statement}`,
+    answer: baseCard.answer,
+    correctFeedback: baseCard.correctFeedback,
+    wrongFeedback: baseCard.wrongFeedback,
+    curiosity: baseCard.curiosity,
+    explanationText: baseCard.explanationText,
+    tag: baseCard.tag
+  }, "related", baseCard);
+}
+
+function removeExpiredTempCards(tempCards, referenceTime = now()) {
+  return tempCards.filter((card) => !card.expiresAt || card.expiresAt > referenceTime);
+}
+
+function activateTemporaryCard(card, startedAt) {
+  if (!card || !card.temporary || card.expiresAt) return card;
+  return { ...card, activatedAt: startedAt, createdAt: startedAt, updatedAt: startedAt, dueAt: startedAt, expiresAt: startedAt + TEMP_CARD_TTL };
+}
+
+function gradeCard(card, selectedAnswer, responseMs) {
+  const reviewedAt = now();
+  const wasCorrect = selectedAnswer === card.answer;
+  const reviewClass = classifyReviewTime(responseMs || 0);
+  const nextStreak = wasCorrect ? (card.streak || 0) + 1 : 0;
+  const nextWrong = wasCorrect ? (card.wrong || 0) : (card.wrong || 0) + 1;
+  const nextCorrect = wasCorrect ? (card.correct || 0) + 1 : (card.correct || 0);
+
+  let baseInterval = 20 * MINUTE;
+  if (wasCorrect) {
+    if (nextStreak === 1) baseInterval = card.wrong ? 12 * 60 * MINUTE : DAY;
+    else if (nextStreak === 2) baseInterval = 3 * DAY;
+    else if (nextStreak === 3) baseInterval = 7 * DAY;
+    else baseInterval = Math.max(card.intervalMs || 7 * DAY, DAY) * 2;
+    baseInterval *= reviewClass.multiplier;
+  } else {
+    baseInterval = nextWrong >= 3 ? 5 * MINUTE : nextWrong === 2 ? 10 * MINUTE : 20 * MINUTE;
+  }
+
+  const intervalMs = clamp(Math.round(baseInterval), wasCorrect ? 10 * MINUTE : 3 * MINUTE, 120 * DAY);
+  return {
+    ...card,
+    reviews: (card.reviews || 0) + 1,
+    correct: nextCorrect,
+    wrong: nextWrong,
+    streak: nextStreak,
+    reviewBurden: clamp((card.reviewBurden || 0) + (wasCorrect ? -1 : 2), 0, 20),
+    reviewStage: wasCorrect ? (nextStreak >= 3 ? "consolidação" : "aprendizagem") : "reaprendizagem",
+    intervalMs,
+    lastAnswer: selectedAnswer,
+    lastWasCorrect: wasCorrect,
+    lastReviewedAt: reviewedAt,
+    lastResponseMs: responseMs || 0,
+    lastReviewClass: reviewClass.label,
+    nextReviewReason: wasCorrect ? "Acerto registrado; o intervalo aumentou conforme o desempenho." : "Erro registrado; o conteúdo volta mais cedo.",
+    dueAt: card.isHard || card.generatedKind === "hardReview" ? null : reviewedAt + intervalMs,
+    updatedAt: reviewedAt
+  };
+}
+
+export default function App() {
+  const [cards, setCards] = useState(loadCards);
+  const [tempCards, setTempCards] = useState([]);
+  const [tab, setTab] = useState("estudar");
+  const [filter, setFilter] = useState("todos");
+  const [message, setMessage] = useState("");
+  const [manualText, setManualText] = useState("");
+  const [showManualInstructions, setShowManualInstructions] = useState(false);
+  const [showAppGuide, setShowAppGuide] = useState(false);
+  const [studyStarted, setStudyStarted] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [reviewedCard, setReviewedCard] = useState(null);
+  const [lastAnsweredCard, setLastAnsweredCard] = useState(null);
+  const [globalOverlayCard, setGlobalOverlayCard] = useState(null);
+  const [pendingHardCard, setPendingHardCard] = useState(null);
+  const [timeTick, setTimeTick] = useState(now());
+  const [questionStartedAt, setQuestionStartedAt] = useState(null);
+  const [activeQuestionId, setActiveQuestionId] = useState(null);
+  const [isTimerPaused, setIsTimerPaused] = useState(false);
+  const [timerPausedAt, setTimerPausedAt] = useState(null);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [isStandalone, setIsStandalone] = useState(false);
+
+  useEffect(() => saveCards(cards), [cards]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const tick = now();
+      setTimeTick(tick);
+      if (!isTimerPaused) setTempCards((previous) => removeExpiredTempCards(previous, tick));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isTimerPaused]);
+
+  useEffect(() => {
+    const standalone = window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone;
+    setIsStandalone(Boolean(standalone));
+
+    const beforeInstall = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    const installed = () => {
+      setIsStandalone(true);
+      setInstallPrompt(null);
+      setMessage("App instalado com sucesso.");
+    };
+
+    window.addEventListener("beforeinstallprompt", beforeInstall);
+    window.addEventListener("appinstalled", installed);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", beforeInstall);
+      window.removeEventListener("appinstalled", installed);
+    };
+  }, []);
+
+  const effectiveTimeTick = isTimerPaused && timerPausedAt ? timerPausedAt : timeTick;
+  const activeTempCards = useMemo(() => removeExpiredTempCards(tempCards, effectiveTimeTick), [tempCards, effectiveTimeTick]);
+  const tags = useMemo(() => ["todos", ...Array.from(new Set(cards.map((card) => card.tag || "geral"))).sort()], [cards]);
+  const filteredCards = useMemo(() => filter === "todos" ? cards : cards.filter((card) => card.tag === filter), [cards, filter]);
+  const filteredStudyCards = useMemo(() => filteredCards.filter((card) => !card.isHard), [filteredCards]);
+  const filteredTempCards = useMemo(() => filter === "todos" ? activeTempCards : activeTempCards.filter((card) => card.tag === filter), [activeTempCards, filter]);
+  const studyCards = useMemo(() => [...filteredTempCards, ...filteredStudyCards], [filteredTempCards, filteredStudyCards]);
+  const dueCards = useMemo(() => studyCards.filter((card) => card.dueAt && card.dueAt <= now()).sort((a, b) => {
+    if (a.temporary && !b.temporary) return -1;
+    if (!a.temporary && b.temporary) return 1;
+    const burden = (b.reviewBurden || 0) - (a.reviewBurden || 0);
+    if (burden !== 0) return burden;
+    return (a.dueAt || 0) - (b.dueAt || 0);
+  }), [studyCards, timeTick]);
+  const current = dueCards[0] || null;
+  const errorCards = useMemo(() => cards.filter((card) => card.wrong > 0).sort((a, b) => b.wrong - a.wrong), [cards]);
+  const stats = useMemo(() => {
+    const totalReviews = cards.reduce((sum, card) => sum + card.reviews, 0);
+    const totalWrong = cards.reduce((sum, card) => sum + card.wrong, 0);
+    const accuracy = totalReviews ? Math.round(((totalReviews - totalWrong) / totalReviews) * 100) : 0;
+    return { total: cards.length, due: dueCards.length, errors: totalWrong, accuracy };
+  }, [cards, dueCards.length]);
+
+  const rawDisplayCard = globalOverlayCard || reviewedCard || current;
+  const displayCard = studyStarted ? rawDisplayCard : null;
+  const displayQuestionKey = displayCard ? `${displayCard.id}-${displayCard.generatedKind || "normal"}-${displayCard.sourceHardCardId || ""}` : null;
+
+  useEffect(() => {
+    if (!studyStarted || selected !== null || !displayQuestionKey || !displayCard) return;
+    if (activeQuestionId === displayQuestionKey) return;
+    const startedAt = now();
+    setActiveQuestionId(displayQuestionKey);
+    setQuestionStartedAt(startedAt);
+    if (displayCard.temporary && !displayCard.expiresAt) {
+      setTempCards((previous) => previous.map((card) => card.id === displayCard.id ? activateTemporaryCard(card, startedAt) : card));
+    }
+  }, [studyStarted, selected, displayQuestionKey, displayCard, activeQuestionId]);
+
+  const hasAnswered = selected !== null && Boolean(displayCard);
+  const wasCorrect = hasAnswered && displayCard ? selected === displayCard.answer : false;
+  const normalQuestionRemaining = questionStartedAt ? Math.max(0, NORMAL_QUESTION_MS - (effectiveTimeTick - questionStartedAt)) : NORMAL_QUESTION_MS;
+  const normalQuestionPercent = questionStartedAt ? getTimerPercent(questionStartedAt, NORMAL_QUESTION_MS, effectiveTimeTick) : 100;
+  const shouldShowNormalTimer = displayCard && !hasAnswered && !displayCard.temporary && displayCard.generatedKind !== "hardReview";
+
+  function installApp() {
+    if (!installPrompt) {
+      setMessage(isStandalone ? "Este app já está instalado." : "Para instalar: abra no Chrome do Android, toque no menu ⋮ e escolha Instalar app ou Adicionar à tela inicial.");
+      return;
+    }
+    installPrompt.prompt();
+    installPrompt.userChoice.finally(() => setInstallPrompt(null));
+  }
+
+  function startStudy() {
+    setIsTimerPaused(false);
+    setTimerPausedAt(null);
+    setStudyStarted(true);
+    setSelected(null);
+    setReviewedCard(null);
+    setGlobalOverlayCard(null);
+    setPendingHardCard(null);
+    setActiveQuestionId(null);
+    setQuestionStartedAt(null);
+    setTab("estudar");
+  }
+
+  function clearAnswerState() {
+    setIsTimerPaused(false);
+    setTimerPausedAt(null);
+    setSelected(null);
+    setReviewedCard(null);
+    setActiveQuestionId(null);
+    setQuestionStartedAt(null);
+
+    if (pendingHardCard) {
+      setGlobalOverlayCard(pendingHardCard);
+      setPendingHardCard(null);
+    } else {
+      setGlobalOverlayCard(null);
+    }
+    setTempCards((previous) => removeExpiredTempCards(previous));
+  }
+
+  function toggleTimerPause() {
+    if (!displayCard || selected !== null || !questionStartedAt) return;
+    if (!isTimerPaused) {
+      setTimerPausedAt(now());
+      setIsTimerPaused(true);
+      return;
+    }
+    const resumedAt = now();
+    const pausedFor = Math.max(0, resumedAt - (timerPausedAt || resumedAt));
+    setQuestionStartedAt((previous) => previous ? previous + pausedFor : previous);
+    if (displayCard.temporary && displayCard.expiresAt) {
+      setTempCards((previous) => previous.map((card) => card.id === displayCard.id ? {
+        ...card,
+        activatedAt: card.activatedAt ? card.activatedAt + pausedFor : card.activatedAt,
+        createdAt: card.createdAt ? card.createdAt + pausedFor : card.createdAt,
+        dueAt: card.dueAt ? card.dueAt + pausedFor : card.dueAt,
+        expiresAt: card.expiresAt ? card.expiresAt + pausedFor : card.expiresAt
+      } : card));
+    }
+    setTimerPausedAt(null);
+    setIsTimerPaused(false);
+    setTimeTick(resumedAt);
+  }
+
+  function answerCurrent(value) {
+    const targetCard = globalOverlayCard || current;
+    if (!targetCard || selected !== null) return;
+    const answerReferenceTime = isTimerPaused && timerPausedAt ? timerPausedAt : now();
+    const responseMs = answerReferenceTime - (questionStartedAt || answerReferenceTime);
+    setIsTimerPaused(false);
+    setTimerPausedAt(null);
+    const updated = gradeCard(targetCard, value, responseMs);
+    const wasAnswerCorrect = value === targetCard.answer;
+
+    setSelected(value);
+    setReviewedCard(updated);
+    setLastAnsweredCard(updated);
+
+    if (globalOverlayCard) {
+      if (globalOverlayCard.sourceHardCardId) {
+        setCards((previous) => previous.map((card) => card.id === globalOverlayCard.sourceHardCardId ? { ...updated, dueAt: null, isHard: true, generatedKind: null, sourceHardCardId: null } : card));
+      }
+      if (!wasAnswerCorrect) {
+        const simplified = createSimplifiedCard(updated);
+        if (simplified) setTempCards((previous) => [simplified, ...removeExpiredTempCards(previous)]);
+      }
+      return;
+    }
+
+    if (current?.temporary) {
+      setTempCards((previous) => {
+        const stillValid = removeExpiredTempCards(previous).filter((card) => card.id !== current.id);
+        const shouldCreateSimplification = current.generatedKind === "simplified" || !wasAnswerCorrect;
+        if (!shouldCreateSimplification) return stillValid;
+        const simplified = createSimplifiedCard(updated);
+        return simplified ? [simplified, ...stillValid] : stillValid;
+      });
+      return;
+    }
+
+    setCards((previous) => previous.map((card) => card.id === current.id ? updated : card));
+
+    if (!wasAnswerCorrect) {
+      const simplified = createSimplifiedCard(updated);
+      if (simplified) setTempCards((previous) => [simplified, ...removeExpiredTempCards(previous)]);
+      return;
+    }
+
+    if (responseMs <= HARD_TRIGGER_MS) {
+      const hardCard = findHardQuestionForBase(cards, updated);
+      if (hardCard) {
+        setPendingHardCard(normalizeCard({ ...hardCard, generatedKind: "hardReview", sourceHardCardId: hardCard.id, originId: updated.id, temporary: false, expiresAt: null }));
+        setMessage("Você respondeu antes de 5 segundos. A próxima será a questão difícil vinculada.");
+      }
+    }
+  }
+
+  function handleGenerateRelatedQuestion() {
+    const baseCard = reviewedCard || globalOverlayCard || current || lastAnsweredCard;
+    if (!baseCard) return;
+    const related = createRelatedCard(baseCard);
+    setTempCards((previous) => [related, ...removeExpiredTempCards(previous)]);
+    setMessage("Treino extra temporário criado. O prazo começa quando você entrar nele.");
+    clearAnswerState();
+  }
+
+  function handleManualAdd() {
+    const parsedCards = parseAnnotatedManualBatch(manualText, "geral");
+    if (!parsedCards.length) {
+      setMessage("Não consegui identificar questões. Use [questao]...[/questao] e os blocos do botão Instrução.");
+      return;
+    }
+    setCards((previous) => [...parsedCards, ...previous]);
+    setManualText("");
+    setMessage(`${parsedCards.filter((card) => !card.isHard).length} questão(ões) adicionada(s).`);
+    setTab("estudar");
+  }
+
+  function removeCard(id) {
+    setCards((previous) => previous.filter((card) => card.id !== id));
+  }
+
+  function markDue(id) {
+    setCards((previous) => previous.map((card) => card.id === id && !card.isHard ? { ...card, dueAt: now(), updatedAt: now() } : card));
+  }
+
+  function resetSeed() {
+    setCards(createSeedDeck());
+    setTempCards([]);
+    setStudyStarted(false);
+    clearAnswerState();
+    setMessage("Banco reiniciado com exemplos genéricos.");
+  }
+
+  function copyManualInstructionPrompt() {
+    navigator.clipboard?.writeText(manualInstructionPrompt);
+    setMessage("Instrução copiada.");
+  }
+
+  return (
+    <div className="min-h-screen text-slate-900 p-3 pb-28 sm:p-4 sm:pb-28 md:p-8 app-futuristic-bg relative overflow-hidden">
+      <div className="relative z-10 mx-auto max-w-6xl space-y-4 md:space-y-6">
+        <header className="rounded-[1.75rem] md:rounded-3xl bg-white/90 backdrop-blur shadow-sm border border-cyan-100/70 p-3 sm:p-4 md:p-6 overflow-hidden relative">
+          <div className="absolute inset-0 pointer-events-none opacity-60 bg-[radial-gradient(circle_at_12%_18%,rgba(34,211,238,0.18),transparent_26%),radial-gradient(circle_at_88%_80%,rgba(217,70,239,0.14),transparent_30%)]" />
+          <div className="relative flex flex-col items-center justify-center gap-3">
+            <AppLogo />
+            <button onClick={installApp} className="rounded-2xl bg-slate-950 text-white px-4 py-2 text-sm font-black border border-cyan-300/30 shadow-[0_0_18px_rgba(34,211,238,0.25)]">
+              {isStandalone ? "App instalado" : "Instalar app"}
+            </button>
+          </div>
+        </header>
+
+        <nav className="fixed bottom-3 left-3 right-3 z-50 md:static rounded-[1.65rem] md:rounded-3xl bg-slate-950/90 md:bg-slate-950/75 backdrop-blur-xl border border-cyan-300/25 shadow-[0_0_28px_rgba(34,211,238,0.22)] p-1.5 md:p-3 safe-mobile-nav">
+          <div className="grid grid-cols-5 md:flex md:flex-wrap items-stretch md:items-center justify-center gap-1.5 md:gap-2">
+            <NavButton active={showAppGuide} icon="⚙" label="Funções" onClick={() => setShowAppGuide((value) => !value)} />
+            <NavButton active={tab === "estudar"} icon="▶" label="Estudar" onClick={() => { setTab("estudar"); clearAnswerState(); }} />
+            <NavButton active={tab === "importar"} icon="⬆" label="Importar" onClick={() => { setTab("importar"); setStudyStarted(false); clearAnswerState(); }} />
+            <NavButton active={tab === "erros"} icon="✕" label="Erros" onClick={() => { setTab("erros"); setStudyStarted(false); clearAnswerState(); }} />
+            <NavButton active={tab === "baralho"} icon="▣" label="Questões" onClick={() => { setTab("baralho"); setStudyStarted(false); clearAnswerState(); }} />
+          </div>
+        </nav>
+
+        {showAppGuide && <AppGuidePanel />}
+
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Stat label="Questões" value={stats.total} />
+          <Stat label="Para revisar" value={stats.due} />
+          <Stat label="Erros" value={stats.errors} />
+          <Stat label="Acerto" value={`${stats.accuracy}%`} />
+        </section>
+
+        {message && <div className="rounded-2xl bg-slate-900 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm"><span>{message}</span><button onClick={() => setMessage("")} className="underline">fechar</button></div>}
+
+        <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <label htmlFor="tag-filter" className="text-sm font-bold text-slate-600">Filtrar por tema</label>
+          <select id="tag-filter" value={filter} onChange={(event) => { setFilter(event.target.value); clearAnswerState(); setStudyStarted(false); }} className="input sm:max-w-sm font-semibold cursor-pointer">
+            {tags.map((tag) => <option key={tag} value={tag}>{tag === "todos" ? "Todos os temas" : tag}</option>)}
+          </select>
+        </div>
+
+        {tab === "estudar" && (
+          <main className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
+            <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-4 md:p-8 min-h-[470px] flex flex-col">
+              {!studyStarted ? <StartStudyScreen dueCount={dueCards.length} onStart={startStudy} /> : displayCard ? (
+                <>
+                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap gap-2">
+                        <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{displayCard.tag}</span>
+                        {displayCard.generatedKind === "hardReview" && <span className="inline-flex rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-800">difícil vinculada</span>}
+                        {displayCard.temporary && displayCard.expiresAt && <span className="inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">temporária · {formatCountdown(displayCard.expiresAt, effectiveTimeTick)}</span>}
+                      </div>
+                      <p className="mt-5 text-xs font-bold uppercase tracking-wide text-slate-500">Julgue a afirmação</p>
+                      <h2 className="text-xl md:text-3xl font-bold mt-2 leading-tight">{displayCard.statement}</h2>
+                      {shouldShowNormalTimer && <NormalQuestionTimer remaining={normalQuestionRemaining} percent={normalQuestionPercent} />}
+                      {displayCard.temporary && displayCard.expiresAt && <TempTimer card={displayCard} referenceTime={effectiveTimeTick} isPaused={isTimerPaused} />}
+                      {!hasAnswered && (shouldShowNormalTimer || (displayCard.temporary && displayCard.expiresAt)) && <TimerPauseButton isPaused={isTimerPaused} onClick={toggleTimerPause} />}
+                    </div>
+                    <div className="text-left md:text-right text-xs text-slate-500 flex md:block gap-3">
+                      <div>Erros: <b>{displayCard.wrong || 0}</b></div>
+                      <div>Sequência: <b>{displayCard.streak || 0}</b></div>
+                      <div>Prioridade: <b>{(displayCard.reviewBurden || 0).toFixed(1)}</b></div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <ChoiceButton disabled={hasAnswered} active={selected === true} onClick={() => answerCurrent(true)} title="Certo" />
+                    <ChoiceButton disabled={hasAnswered} active={selected === false} onClick={() => answerCurrent(false)} title="Errado" />
+                  </div>
+
+                  <div className="mt-6 flex-1">
+                    {!hasAnswered ? <div className="rounded-3xl border-2 border-dashed border-slate-300 p-6 text-slate-500 text-center">Escolha <b>Certo</b> ou <b>Errado</b> para liberar o feedback.</div> : (
+                      <div className={`rounded-3xl border p-4 md:p-6 ${wasCorrect ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
+                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                          <p className={`text-xl font-black ${wasCorrect ? "text-emerald-800" : "text-rose-800"}`}>{wasCorrect ? "Você acertou." : "Você errou."}</p>
+                          <p className="text-sm font-bold text-slate-700">Gabarito: {displayCard.answer ? "Certo" : "Errado"}</p>
+                        </div>
+                        <ReviewClassification card={displayCard} />
+                        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <FeedbackBox title="Curiosidade da questão" text={displayCard.curiosity} />
+                          <FeedbackBox title="Explicação" text={displayCard.explanationText} />
+                        </div>
+                        <div className="mt-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                          <p className="text-sm text-slate-600">{displayCard.isHard || displayCard.generatedKind === "hardReview" ? "Questão difícil: aparece apenas por evento." : `Próxima revisão: ${displayCard.temporary ? formatCountdown(displayCard.expiresAt, effectiveTimeTick) : formatWhen(displayCard.dueAt)}`}</p>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <button onClick={handleGenerateRelatedQuestion} className="rounded-2xl bg-slate-100 text-slate-800 px-5 py-3 font-bold hover:bg-slate-200">Criar treino extra</button>
+                            <button type="button" onClick={clearAnswerState} className="rounded-2xl bg-slate-900 text-white px-5 py-3 font-bold hover:bg-slate-700">{pendingHardCard ? "Próxima difícil" : "Próxima questão"}</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : <EmptyStudy />}
+            </div>
+
+            <aside className="space-y-4">
+              <section className="rounded-3xl bg-white border border-slate-200 shadow-sm p-5">
+                <h2 className="text-xl font-bold mb-3">Como funciona</h2>
+                <p className="text-sm text-slate-600 leading-relaxed">O app usa revisão espaçada adaptativa. Erros fazem o conteúdo voltar mais cedo; acertos aumentam o intervalo. Nenhum timer começa antes de a questão aparecer na tela, e o botão Pausar timer congela a contagem.</p>
+              </section>
+            </aside>
+          </main>
+        )}
+
+        {tab === "importar" && (
+          <main className="max-w-3xl mx-auto">
+            <Panel title="Adicionar manualmente">
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <p className="text-sm text-slate-600">Cole um ou vários blocos gerados por IA. Separe cada conjunto com [questao]...[/questao].</p>
+                  <button onClick={() => setShowManualInstructions((value) => !value)} className="rounded-2xl bg-slate-100 text-slate-800 px-4 py-2 text-sm font-bold hover:bg-slate-200">Instrução</button>
+                </div>
+                {showManualInstructions && <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4 space-y-3"><textarea readOnly value={manualInstructionPrompt} className="w-full min-h-[320px] rounded-2xl border border-slate-300 px-4 py-3 bg-white font-mono text-xs" /><button onClick={copyManualInstructionPrompt} className="w-full rounded-2xl bg-slate-900 text-white py-3 font-bold hover:bg-slate-700">Copiar instrução</button></div>}
+                <textarea className="input min-h-[260px] md:min-h-[320px] font-mono text-sm" placeholder="Cole aqui os conjuntos [questao]...[/questao]." value={manualText} onChange={(event) => setManualText(event.target.value)} />
+                <button onClick={handleManualAdd} className="w-full rounded-2xl bg-slate-900 text-white py-3 font-bold hover:bg-slate-700">Adicionar questão(ões)</button>
+              </div>
+            </Panel>
+          </main>
+        )}
+
+        {tab === "erros" && (
+          <main className="rounded-3xl bg-white border border-slate-200 shadow-sm p-4 md:p-6">
+            <h2 className="text-2xl font-bold">Caderno de erros</h2>
+            <p className="text-slate-600 mb-5">Questões erradas aparecem primeiro nas revisões.</p>
+            {errorCards.length ? <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{errorCards.map((card) => <QuestionCard key={card.id} card={card} onMarkDue={markDue} onRemove={removeCard} showRemove={false} />)}</div> : <div className="rounded-3xl bg-slate-50 border border-slate-200 p-10 text-center text-slate-600">Nenhum erro registrado ainda.</div>}
+          </main>
+        )}
+
+        {tab === "baralho" && (
+          <main className="rounded-3xl bg-white border border-slate-200 shadow-sm p-4 md:p-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5">
+              <div><h2 className="text-2xl font-bold">Todas as questões</h2><p className="text-slate-600">Gerencie, force revisão ou apague itens.</p></div>
+              <button onClick={resetSeed} className="rounded-2xl bg-slate-100 text-slate-800 px-4 py-2 font-bold hover:bg-slate-200">Reiniciar exemplos</button>
+            </div>
+            <div className="space-y-3">{filteredCards.map((card) => <QuestionRow key={card.id} card={card} onMarkDue={markDue} onRemove={removeCard} />)}</div>
+          </main>
+        )}
+      </div>
+      <style>{`.app-futuristic-bg { background: radial-gradient(circle at 8% 10%, rgba(37, 99, 235, 0.42), transparent 28%), radial-gradient(circle at 92% 88%, rgba(217, 70, 239, 0.36), transparent 30%), radial-gradient(circle at 70% 12%, rgba(6, 182, 212, 0.24), transparent 24%), linear-gradient(135deg, #020617 0%, #07112e 38%, #111047 68%, #020617 100%); isolation: isolate; } .app-futuristic-bg::before { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: 0.78; background-image: linear-gradient(115deg, transparent 0 12%, rgba(59, 130, 246, 0.16) 12.2%, transparent 12.7% 44%, rgba(168, 85, 247, 0.18) 44.2%, transparent 44.8% 100%), linear-gradient(65deg, transparent 0 28%, rgba(14, 165, 233, 0.13) 28.2%, transparent 29% 72%, rgba(236, 72, 153, 0.14) 72.2%, transparent 73% 100%); } .app-futuristic-bg::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: 0.42; background-image: linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px), radial-gradient(circle, rgba(125, 211, 252, 0.28) 1px, transparent 1.4px); background-size: 58px 58px, 58px 58px, 24px 24px; mask-image: radial-gradient(circle at center, black 0 72%, transparent 100%); } .input { width: 100%; border-radius: 1rem; border: 1px solid rgb(203 213 225); padding: 0.75rem 1rem; background: white; } .safe-mobile-nav { padding-bottom: max(0.375rem, env(safe-area-inset-bottom)); } @media (min-width: 768px) { .safe-mobile-nav { padding-bottom: 0.75rem; } } .w-22 { width: 5.5rem; } .h-18 { height: 4.5rem; }`}</style>
+    </div>
+  );
+}
+
+function NavButton({ active, icon, label, onClick }) {
+  return <button type="button" onClick={onClick} className={`rounded-2xl px-2 py-2.5 md:px-4 md:py-3 text-[10px] sm:text-xs md:text-sm font-black transition border whitespace-nowrap ${active ? "bg-cyan-400 text-slate-950 border-cyan-200 shadow-[0_0_18px_rgba(34,211,238,0.55)]" : "bg-white/10 text-slate-100 border-white/10 hover:bg-cyan-400/20 hover:border-cyan-300/40"}`}><span className="block md:inline md:mr-2 text-base leading-none">{icon}</span><span>{label}</span></button>;
+}
+
+function AppLogo() {
+  return (
+    <div className="relative w-28 h-24 sm:w-32 sm:h-28 md:w-44 md:h-32 flex items-center justify-center scale-95 md:scale-100" aria-label="Símbolo do app">
+      <div className="absolute inset-3 rounded-[2rem] bg-slate-950 shadow-[0_0_28px_rgba(34,211,238,0.38),0_0_48px_rgba(217,70,239,0.28)] border border-cyan-300/50 rotate-[-2deg]" />
+      <div className="absolute w-24 h-24 md:w-28 md:h-28 rounded-full border-[7px] border-cyan-300/80 border-b-fuchsia-400/80 border-l-fuchsia-400/80 shadow-[0_0_22px_rgba(34,211,238,0.55)]" />
+      <div className="relative z-10 flex items-center justify-center">
+        <div className="absolute translate-x-5 translate-y-1 w-20 h-14 md:w-24 md:h-16 rounded-2xl bg-fuchsia-400 shadow-[0_0_18px_rgba(217,70,239,0.65)] rotate-6" />
+        <div className="absolute translate-x-2 w-20 h-14 md:w-24 md:h-16 rounded-2xl bg-blue-500 shadow-[0_0_18px_rgba(59,130,246,0.65)] rotate-2" />
+        <div className="relative w-22 h-16 md:w-28 md:h-18 rounded-2xl bg-white shadow-[0_12px_30px_rgba(15,23,42,0.28),0_0_18px_rgba(255,255,255,0.8)] -rotate-3 flex flex-col items-center justify-center gap-1">
+          <div className="flex items-center justify-center gap-1"><div className="w-0 h-0 border-y-[11px] border-y-transparent border-l-[18px] border-l-cyan-500" /><div className="w-0 h-0 border-y-[11px] border-y-transparent border-l-[18px] border-l-blue-600" /></div>
+          <div className="w-12 h-1.5 rounded-full bg-slate-300/80" /><div className="w-9 h-1.5 rounded-full bg-slate-300/70" />
+        </div>
+      </div>
+      <div className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-slate-950 border border-fuchsia-400 shadow-[0_0_16px_rgba(217,70,239,0.75)] flex items-center justify-center text-fuchsia-300 text-2xl font-black">×</div>
+      <div className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-slate-950 border border-cyan-300 shadow-[0_0_16px_rgba(34,211,238,0.75)] flex items-center justify-center text-cyan-200 text-2xl font-black">✓</div>
+    </div>
+  );
+}
+
+function AppGuidePanel() {
+  return <section className="rounded-3xl bg-white border border-indigo-100 shadow-sm p-5 md:p-7"><p className="text-sm font-black uppercase tracking-wide text-indigo-700">Guia detalhado</p><h2 className="text-2xl md:text-3xl font-black mt-1">Funções do app</h2><div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4"><GuideItem title="Instalável" text="Este pacote é um PWA. Após publicar ou abrir em ambiente seguro, o Chrome permite instalar como aplicativo." /><GuideItem title="Timers" text="Nenhum timer começa antes de a questão aparecer. O botão Pausar timer congela a contagem." /><GuideItem title="Importação" text="Use [questao]...[/questao] para colar várias questões por vez." /><GuideItem title="Revisão" text="Acertos aumentam o intervalo; erros fazem o conteúdo voltar mais cedo e podem gerar simplificações." /></div></section>;
+}
+
+function GuideItem({ title, text }) {
+  return <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4"><h3 className="font-black text-slate-900">{title}</h3><p className="text-sm text-slate-600 mt-1 leading-relaxed">{text}</p></div>;
+}
+
+function StartStudyScreen({ dueCount, onStart }) {
+  return <div className="flex-1 flex flex-col items-center justify-center text-center"><button onClick={onStart} aria-label="Iniciar estudo" className="rounded-full bg-slate-900 text-white w-24 h-24 flex items-center justify-center text-4xl font-black shadow-sm hover:bg-slate-700 transition hover:scale-105">▶</button><h2 className="text-3xl font-bold mt-5">Preparar estudo</h2><p className="text-slate-600 mt-2 max-w-md">Toque no play para começar. Nenhum timer começa antes de a questão aparecer na tela.</p><p className="text-sm font-semibold text-slate-500 mt-3">Questões disponíveis agora: {dueCount}</p></div>;
+}
+
+function EmptyStudy() {
+  return <div className="flex-1 flex flex-col items-center justify-center text-center"><div className="text-6xl">✓</div><h2 className="text-3xl font-bold mt-4">Nada pendente agora</h2><p className="text-slate-600 mt-2 max-w-md">Você revisou tudo que estava vencido. Use Importar para colocar novos itens ou force revisão em alguma questão.</p></div>;
+}
+
+function Stat({ label, value }) {
+  return <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-4"><div className="text-2xl font-bold">{value}</div><div className="text-sm text-slate-500 font-semibold">{label}</div></div>;
+}
+
+function Panel({ title, children }) {
+  return <section className="rounded-3xl bg-white border border-slate-200 shadow-sm p-5"><h2 className="text-xl font-bold mb-4">{title}</h2>{children}</section>;
+}
+
+function ChoiceButton({ title, onClick, disabled, active }) {
+  const isCorrectChoice = title === "Certo";
+  const activeClass = isCorrectChoice ? "bg-emerald-600 text-white border-emerald-600" : "bg-rose-600 text-white border-rose-600";
+  const idleClass = isCorrectChoice ? "bg-slate-50 border-slate-200 text-slate-900 hover:bg-emerald-50" : "bg-slate-50 border-slate-200 text-slate-900 hover:bg-rose-50";
+  return <button disabled={disabled} onClick={onClick} className={`rounded-3xl p-5 md:p-6 text-left border transition-all ${active ? activeClass : idleClass} disabled:cursor-not-allowed`}><div className="text-2xl font-black">{title}</div><div className={`text-sm mt-1 ${active ? "text-white/80" : "text-slate-500"}`}>Clique para responder</div></button>;
+}
+
+function FeedbackBox({ title, text }) {
+  return <div className="rounded-2xl bg-white border border-slate-200 p-4"><p className="text-sm font-bold text-slate-500 uppercase">{title}</p><p className="mt-2 text-slate-700 whitespace-pre-wrap">{text}</p></div>;
+}
+
+function NormalQuestionTimer({ remaining, percent }) {
+  const elapsed = Math.max(0, NORMAL_QUESTION_MS - remaining);
+  const stage = elapsed <= HARD_TRIGGER_MS ? "green" : elapsed <= 45 * 1000 ? "blue" : "red";
+  const barClass = stage === "green" ? "bg-emerald-500" : stage === "blue" ? "bg-sky-500" : "bg-rose-500";
+  return <div className="mt-4 w-full rounded-2xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center justify-between gap-3 text-sm font-bold text-slate-800"><span>Tempo da questão</span><span>{remaining > 0 ? formatDuration(remaining) : "tempo excedido"}</span></div><div className="mt-2 h-2 rounded-full bg-white overflow-hidden"><div className={`h-full transition-all ${barClass}`} style={{ width: `${percent}%` }} /></div><p className="mt-2 text-xs text-slate-500">5s para questão difícil · 45s fase lenta · 1min total</p></div>;
+}
+
+function TempTimer({ card, referenceTime, isPaused }) {
+  return <div className="mt-4 rounded-2xl bg-amber-50 border border-amber-200 p-3"><div className="flex items-center justify-between gap-3 text-sm font-bold text-amber-900"><span>{isPaused ? "Temporizador pausado" : "Temporizador da questão"}</span><span>{formatCountdown(card.expiresAt, referenceTime)}</span></div><div className="mt-2 h-2 rounded-full bg-amber-100 overflow-hidden"><div className="h-full bg-amber-500 transition-all" style={{ width: `${getCountdownPercent(card, referenceTime)}%` }} /></div></div>;
+}
+
+function TimerPauseButton({ isPaused, onClick }) {
+  return <button type="button" onClick={onClick} className={`mt-3 w-full rounded-2xl px-4 py-3 font-black border transition ${isPaused ? "bg-cyan-950 text-cyan-100 border-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.45)]" : "bg-slate-950 text-white border-slate-800 hover:bg-slate-800"}`}>{isPaused ? "▶ Continuar timer" : "⏸ Pausar timer"}</button>;
+}
+
+function ReviewClassification({ card }) {
+  if (!card.lastReviewClass) return null;
+  return <div className="mt-5 rounded-2xl bg-white border border-slate-200 p-4"><p className="text-sm font-bold text-slate-500 uppercase">Classificação</p><p className="mt-1 text-lg font-black text-slate-900">{card.lastReviewClass}</p><p className="text-sm text-slate-600 mt-1">Tempo de resposta: <b>{formatDuration(card.lastResponseMs || 0)}</b></p><p className="text-sm text-slate-600 mt-1">Fase: <b>{card.reviewStage}</b></p><p className="text-sm text-slate-600 mt-2">{card.nextReviewReason}</p></div>;
+}
+
+function QuestionCard({ card, onMarkDue }) {
+  return <div className="rounded-3xl bg-slate-50 border border-slate-200 p-5"><div className="flex items-start justify-between gap-3"><span className="rounded-full bg-white border border-slate-200 px-3 py-1 text-xs font-bold text-slate-600">{card.tag}</span><span className="text-sm font-bold text-slate-700">{card.wrong} erro(s)</span></div><h3 className="font-bold text-lg mt-4">{card.statement}</h3><p className="text-sm text-slate-600 mt-2">Gabarito: <b>{card.answer ? "Certo" : "Errado"}</b></p><p className="text-slate-700 mt-2 whitespace-pre-wrap">{card.explanationText}</p><button onClick={() => onMarkDue(card.id)} className="mt-3 rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-bold">Revisar agora</button></div>;
+}
+
+function QuestionRow({ card, onMarkDue, onRemove }) {
+  return <div className="rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row md:items-center gap-3 md:justify-between"><div className="min-w-0"><div className="text-xs font-bold text-slate-500">{card.tag} · {card.isHard ? "difícil por evento" : `próxima: ${formatWhen(card.dueAt)}`} · última: {formatDateTime(card.lastReviewedAt)}</div><div className="font-bold mt-1">{card.statement}</div><div className="text-sm text-slate-600 mt-1 line-clamp-2">{card.explanationText}</div></div><div className="flex gap-2 shrink-0"><button onClick={() => onMarkDue(card.id)} className="rounded-xl bg-slate-900 text-white px-3 py-2 text-sm font-bold">Revisar</button><button onClick={() => onRemove(card.id)} className="rounded-xl bg-slate-100 text-slate-700 px-3 py-2 text-sm font-bold">Apagar</button></div></div>;
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<RevisorDireitoApp />);
+    </script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
+  </body>
+</html>
